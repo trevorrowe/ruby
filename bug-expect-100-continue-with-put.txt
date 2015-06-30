@@ -1,0 +1,48 @@
+## Issue
+
+Net::HTTP added support back in 1.9.3 for 'Expect: 100-continue'. This is a feature that allows a client to send a request and politely wait for the server to respond that they will accept the incoming request before sending the body of the request.
+
+The current implementation appears to work correctly for POST requests, but it can generate internal errors when making PUT requests.
+
+## How to reproduce
+
+* User makes a PUT request, setting the 'Expect: 100-continue' header and a continue timeout.
+
+* The remote end responds with ANY non 100-continue response.
+
+* The Net::HTTP fails to parse the non 100-continue response and instead raises:
+
+      Conn close because of error undefined method `closed?' for nil:NilClass
+      /Users/trevrowe/.rbenv/versions/2.2.2/lib/ruby/2.2.0/net/http/response.rb:329:in `stream_check': undefined method `closed?' for nil:NilClass (NoMethodError)
+        from /Users/trevrowe/.rbenv/versions/2.2.2/lib/ruby/2.2.0/net/http/response.rb:199:in `read_body'
+        from /Users/trevrowe/.rbenv/versions/2.2.2/lib/ruby/2.2.0/net/http/response.rb:226:in `body'
+        from /Users/trevrowe/.rbenv/versions/2.2.2/lib/ruby/2.2.0/net/http.rb:1473:in `end_transport'
+        from /Users/trevrowe/.rbenv/versions/2.2.2/lib/ruby/2.2.0/net/http.rb:1443:in `transport_request'
+        from /Users/trevrowe/.rbenv/versions/2.2.2/lib/ruby/2.2.0/net/http.rb:1384:in `request'
+        from /Users/trevrowe/.rbenv/versions/2.2.2/lib/ruby/2.2.0/net/http.rb:1377:in `block in request'
+        from /Users/trevrowe/.rbenv/versions/2.2.2/lib/ruby/2.2.0/net/http.rb:853:in `start'
+        from /Users/trevrowe/.rbenv/versions/2.2.2/lib/ruby/2.2.0/net/http.rb:1375:in `request'
+        from client-3.rb:15:in `<main>'
+
+## Solution
+
+diff --git a/lib/net/http.rb b/lib/net/http.rb
+index 2fc541c..76c8e8d 100644
+--- a/lib/net/http.rb
++++ b/lib/net/http.rb
+@@ -1426,11 +1426,11 @@ module Net   #:nodoc:
+
+           res.uri = req.uri
+
+-          res.reading_body(@socket, req.response_body_permitted?) {
+-            yield res if block_given?
+-          }
+           res
+         }
++        res.reading_body(@socket, req.response_body_permitted?) {
++          yield res if block_given?
++        }
+       rescue Net::OpenTimeout
+         raise
+       rescue Net::ReadTimeout, IOError, EOFError,
+

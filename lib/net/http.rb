@@ -1441,6 +1441,13 @@ module Net   #:nodoc:
         if count == 0 && IDEMPOTENT_METHODS_.include?(req.method)
           count += 1
           @socket.close if @socket and not @socket.closed?
+          #if req.body_stream
+          #  if req.body_stream.respond_to?(:rewind)
+          #    req.body_stream.rewind
+          #  else
+          #    raise
+          #  end
+          #end
           D "Conn close because of error #{exception}, and retry"
           retry
         end

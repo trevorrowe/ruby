@@ -1,0 +1,73 @@
+Net::HTTP#request has a bug in how it handles idempotent retries. When making a PUT request with a `#body_stream`, Net::HTTP will attempt to retry failed requests wihtout rewinding the body stream IO object. This causes the retry to start sending bytes from the middle of the source IO object.
+
+## Steps to reproduce:
+
+* Make a PUT request using `#body_stream=`, for example:
+
+  file = File.open('source', 'rb')
+  req = Net::HTTP::Put.new('/', { 'content-length' => File.size(file).to_s})
+  req.body_stream = file
+
+  http = Net::HTTP.new(hostname, port)
+  http.request(req)
+
+* Transient networking issue causes the PUT to fail after any number of bytes have been read from the `#body_stream`.
+
+* Net::HTTP rescues the networking error. It then determines the PUT request is idempotent and attempts to retry the request. Relevant code is linked and shown below: https://github.com/ruby/ruby/blob/trunk/lib/net/http.rb#L1441-L1446
+
+      if count == 0 && IDEMPOTENT_METHODS_.include?(req.method)
+        count += 1
+        @socket.close if @socket and not @socket.closed?
+        D "Conn close because of error #{exception}, and retry"
+        retry
+      end
+
+* The follow-up request sends the same headers, especially the same Content-Length header. It then continues to call #read on the #body_stream WITHOUT rewinding! If 100 bytes were read in the failed request, then the second request will continue reading from the #body_stream with a 100 byte offset.
+
+* Net::HTTP reaches the end of the #body_stream. The remote end continues waiting for the remaining 100 bytes. Eventually the server or the client will timeout waiting for the other and an error is generated. This later error will mask the original error.
+
+Workarounds:
+
+As a temporary workaround, I monkey-patch Net::HTTP#transport_request. It replaces the code above with the following:
+
+        if count == 0 && Net::HTTP::IDEMPOTENT_METHODS_.include?(req.method)
+          count += 1
+          @socket.close if @socket and not @socket.closed?
+          D "Conn close because of error #{exception}, and retry"
+          if req.body_stream
+            if req.body_stream.respond_to?(:rewind)
+              req.body_stream.rewind
+            else
+              raise
+            end
+          end
+          retry
+        end
+
+This change causes Net::HTTP to attempt to rewind the #body_stream before retrying the request. If this is not possible, it raises the original transport error and skips the retry.
+
+Another workaround is to simply disable the retry of idempotent HTTP requests. This can be done in a single line of code:
+
+    Net::HTTP::IDEMPOTENT_METHODS_.clear
+
+This constant is not publicly documented and appears to be an implementation detail. It also disables all retries for the entire process.
+
+Possible Solutions:
+
+Ideally, Net::HTTP will rewind the body stream, or alert the user that a rewind is necessary. Net::HTTP currently has the following limitations:
+
+* No notification of when a retry happens (outside the debug output).
+* No control over the number of retries or what HTTP methods should be retried.
+* No ability to back-off before a retry happens.
+* No ability to disable the retry logic without monkey-patching.
+
+Another alternative is to disable retries when streaming, i.e. when using #body_stream= vs #body=. Idempotent retries could be disabled completely. The were originally added here:
+
+    https://bugs.ruby-lang.org/issues/5813
+
+The bug report indicates the retries were added because "HTTP/1.1 says a client should retry a request if the request is idempotent." The actual wording from the RFC is that "Client software MAY reopen the transport connection and retransmit the aborted sequence of requests without user interaction so long as the request sequence is idempotent". Notice the usage of MAY (emphasis not mine). See http://tools.ietf.org/html/draft-ietf-httpbis-p1-messaging-17#section-6.1.5
+
+I propose possibly removing the retries as I am opening a semi-related issue with Net::HTTP based on streaming bytes from a GET request and bugs that happen when an idempotent retry is issued. I will link to this issue shortly.
+
+Thoughts? I'd be happy to contribute relevant fixes and tests to resolve this issue.
+

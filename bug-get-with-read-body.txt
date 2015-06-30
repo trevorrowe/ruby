@@ -1,0 +1,61 @@
+Back in Ruby 2.0, Net::HTTP was updated to automatically retry idempotent requests in response to networking errors. When making a GET request with a block, so that bytes can be streamed from the response without loading them into memory, it is possible for Net::HTTP to yield multiple times to the given block.
+
+This mutiple-yield is not documented and was probably not intended behavior.
+
+Demonstration:
+
+* User makes a GET request, passing a block to #request. This allows them to stream bytes from the response as they are received, instead of loading them into memory as a string.
+
+    File.open('target', 'wb') do |file|
+
+      http = Net::HTTP.new(hostname, port)
+
+      http.request(Net::HTTP::Get.new('/')) do |resp|
+        resp.read_body do |chunk|
+          file.write(chunk)
+        end
+      end
+
+    end
+
+* A transient networking error happens causing the GET request to fail. Net::HTTP retries the request yielding to the #request block a second time.
+
+    # the resultant file contains the partial GET body from the first response
+    # followed by the full GET body from the second response.
+
+Workarounds:
+
+The user can create a local to count the number of times the response is yielded and raise an error. This should be considered a hack, especially since the original networking error is swallowed up by Net::HTTP.
+
+    yield_count = 0
+    http = Net::HTTP.new(hostname, port)
+    http.request(Net::HTTP::Get.new('/')) do |resp|
+      yield_count += 1
+      if yield_count > 1
+        raise 'unable to retry errors when streaming data'
+      else
+        resp.read_body do |chunk|
+          file.write(chunk)
+        end
+      end
+    end
+
+Another workaround is to disable idempotent retries. The following monkey-patch is effective, but is touching internals. A public interface for disabling retries would be preferred.
+
+    Net::HTTP::IDEMPOTENT_METHODS_.clear
+
+Possible Solutions:
+
+* Disable retries when a block is given to #request.
+* Allow users to disable retries selectively per request or per session.
+* Remove retry logic.
+
+I opened a related issue caused by blind-retries of idempotent requests. That bug was dealing with streaming PUT bodies.
+
+It appears that Net::HTTP retries were added here:
+
+   https://bugs.ruby-lang.org/issues/5813
+
+That issue suggests that RFC 2616 states a client should retry idempotent requests. In fact, the RFC states a client **may**, not should. Given there are two related issues it seems feasible the client user should have some control over retries. At a minimum, but of these issues should patched.
+
+My suggestion is to disable retries when a block is given.
